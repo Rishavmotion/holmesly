@@ -319,13 +319,38 @@
 
     .recheck-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
 
+    .recheck-card { cursor: pointer; transition: background 0.15s, border-color 0.15s; }
+
     .recheck-check {
       width: 20px;
       height: 20px;
       border: 2px solid var(--border);
       border-radius: 5px;
       flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s, border-color 0.15s;
     }
+
+    .recheck-check svg { width: 13px; height: 13px; opacity: 0; transition: opacity 0.15s; }
+
+    .recheck-card.is-checked { background: #F0FDF4; border-color: #86EFAC; }
+    .recheck-card.is-checked .recheck-check { background: #16A34A; border-color: #16A34A; }
+    .recheck-card.is-checked .recheck-check svg { opacity: 1; }
+    .recheck-card.is-checked .recheck-name { text-decoration: line-through; color: var(--muted); }
+
+    .recheck-meta {
+      grid-column: 2 / -1;
+      font-size: 11px;
+      font-weight: 600;
+      color: #15803D;
+      margin-top: 4px;
+      display: none;
+    }
+    .recheck-card.is-checked .recheck-meta { display: block; }
+
+    .recheck-card.is-saving { opacity: 0.6; pointer-events: none; }
 
     .recheck-body { min-width: 0; }
 
@@ -1269,6 +1294,120 @@
     document.getElementById(id).classList.add('active');
     btn.classList.add('active');
   }
+</script>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+  (function () {
+    const SUPABASE_URL = 'https://xgeyifkpbldtdaufvuez.supabase.co';
+    const SUPABASE_KEY = 'sb_publishable_6f_vb3kyGYgsCJfkpa3QWQ_DwbuF61Z';
+    const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+    const CHECK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+
+    // Build a stable key for each card from its name text.
+    function keyFor(card) {
+      const name = card.querySelector('.recheck-name');
+      return name ? name.textContent.trim() : null;
+    }
+
+    function getUserName() {
+      let name = localStorage.getItem('holmesly_user_name');
+      while (!name || !name.trim()) {
+        name = window.prompt('Enter your name so the team knows who ticked items off:');
+        if (name === null) return null; // cancelled
+        name = name.trim();
+        if (name) localStorage.setItem('holmesly_user_name', name);
+      }
+      return name;
+    }
+
+    function fmt(ts) {
+      if (!ts) return '';
+      const d = new Date(ts);
+      return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) +
+        ' at ' + d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+    }
+
+    const cards = {};
+    function applyState(key, row) {
+      const card = cards[key];
+      if (!card) return;
+      const meta = card.querySelector('.recheck-meta');
+      if (row && row.checked) {
+        card.classList.add('is-checked');
+        meta.textContent = 'Checked by ' + (row.checked_by || 'someone') + ' \u2022 ' + fmt(row.checked_at);
+      } else {
+        card.classList.remove('is-checked');
+        meta.textContent = '';
+      }
+    }
+
+    async function toggle(card, key) {
+      const willCheck = !card.classList.contains('is-checked');
+      let userName = null;
+      if (willCheck) {
+        userName = getUserName();
+        if (userName === null) return; // user cancelled the name prompt
+      }
+      card.classList.add('is-saving');
+      const payload = willCheck
+        ? { item_key: key, checked: true, checked_by: userName, checked_at: new Date().toISOString(), updated_at: new Date().toISOString() }
+        : { item_key: key, checked: false, checked_by: null, checked_at: null, updated_at: new Date().toISOString() };
+
+      const { error } = await db.from('checklist_items').upsert(payload, { onConflict: 'item_key' });
+      card.classList.remove('is-saving');
+      if (error) {
+        console.log('[v0] save error:', error.message);
+        alert('Could not save. Please try again.');
+        return;
+      }
+      applyState(key, payload);
+    }
+
+    function initCards() {
+      document.querySelectorAll('.recheck-card').forEach(function (card) {
+        const key = keyFor(card);
+        if (!key) return;
+        cards[key] = card;
+        card.dataset.key = key;
+
+        const check = card.querySelector('.recheck-check');
+        if (check) check.innerHTML = CHECK_SVG;
+
+        // Add a meta line for "checked by ... at ..."
+        const meta = document.createElement('div');
+        meta.className = 'recheck-meta';
+        card.appendChild(meta);
+
+        card.addEventListener('click', function (e) {
+          if (e.target.closest('a')) return; // don't intercept links
+          toggle(card, key);
+        });
+      });
+    }
+
+    async function loadState() {
+      const { data, error } = await db.from('checklist_items').select('*');
+      if (error) { console.log('[v0] load error:', error.message); return; }
+      (data || []).forEach(function (row) { applyState(row.item_key, row); });
+    }
+
+    function subscribeRealtime() {
+      db.channel('checklist-changes')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'checklist_items' }, function (payload) {
+          const row = payload.new || payload.old;
+          if (row) applyState(row.item_key, payload.new);
+        })
+        .subscribe();
+    }
+
+    document.addEventListener('DOMContentLoaded', function () {
+      initCards();
+      loadState();
+      subscribeRealtime();
+    });
+  })();
 </script>
 
 </body>
